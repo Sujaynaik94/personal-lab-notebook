@@ -1,4 +1,4 @@
-"""Builds the single-file app: python3 build.py  ->  Personal-Lab-Notebook.html
+"""Builds the single-file app: python3 build.py  ->  index.html
 Joins src/app.html (the interface), src/shim.js (browser storage, no server) and vendor/jspdf (PDF export)."""
 import pathlib
 d = pathlib.Path(__file__).parent
@@ -8,5 +8,5 @@ app = app.replace(tag, '<script>' + js.replace('</script>', '<\\/script>') + '</
 old = "const blobUrl = id => '/_blob/' + id;"; assert app.count(old) == 1
 app = app.replace(old, "const blobUrl = id => (window.__blobUrl ? window.__blobUrl(id) : '/_blob/' + id);")
 head = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Personal Lab Notebook</title><script>' + shim + '</script></head><body style="margin:0">'
-(d/'Personal-Lab-Notebook.html').write_text(head + app + '</body></html>')
-print('Built Personal-Lab-Notebook.html')
+(d/'index.html').write_text(head + app + '</body></html>')
+print('Built index.html')

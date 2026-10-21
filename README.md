@@ -9,7 +9,7 @@ A single-file lab notebook for the bench, in your browser. No server, no login, 
 
 ## Use it
 
-Download `Personal-Lab-Notebook.html` and open it in a browser (Chrome, Edge or Firefox). On first run, click **Load example protocol** on the Protocols tab to get an example protocol and an example notebook page. Delete them when you no longer need them.
+Open the live app at https://sujaynaik94.github.io/personal-lab-notebook/, or download `index.html` and open it in a browser (Chrome, Edge or Firefox). On first run, click **Load example protocol** on the Protocols tab to get an example protocol and an example notebook page. Delete them when you no longer need them.
 
 Hosting it (for example GitHub Pages) works too; the file is the whole app.
 
@@ -22,7 +22,7 @@ Everything is stored in your browser (IndexedDB) for that copy of the file, unde
 ```
 python3 build.py
 ```
-This joins `src/app.html`, `src/shim.js` and `vendor/jspdf.umd.min.js` into `Personal-Lab-Notebook.html`.
+This joins `src/app.html`, `src/shim.js` and `vendor/jspdf.umd.min.js` into `index.html`.
 
 ## Known limits
 
