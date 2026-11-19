@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Personal Lab Notebook</title><script>/* Personal Lab Notebook local runtime: stores everything in this browser (IndexedDB). No server, no login. */
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Personal Lab Notebook</title><link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-180.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Lab Notebook"><meta name="theme-color" content="#1a6b59"><script>/* Personal Lab Notebook local runtime: stores everything in this browser (IndexedDB). No server, no login. */
 (() => {
   if (window.claude) return;
   const clone = o => JSON.parse(JSON.stringify(o));
@@ -11,11 +11,16 @@
   const tx = (s, m, f) => new Promise((res, rej) => { const t = idb.transaction(s, m), o = t.objectStore(s); const q = f(o); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); });
   const ready = (async () => {
     try {
-      idb = await open();
+      idb = await Promise.race([open(), new Promise((_, rej) => setTimeout(() => rej(new Error('IndexedDB timeout')), 3000))]);
       await new Promise(res => { const c = idb.transaction('docs').objectStore('docs').openCursor(); c.onsuccess = () => { const x = c.result; if (x) { store.set(x.key, x.value); x.continue(); } else res(); }; c.onerror = res; });
       await new Promise(res => { const c = idb.transaction('blobs').objectStore('blobs').openCursor(); c.onsuccess = () => { const x = c.result; if (x) { urls.set(x.key, URL.createObjectURL(x.value)); x.continue(); } else res(); }; c.onerror = res; });
       if (H && !store.size && !(await metaGet('asked'))) await legacyCopy();
-    } catch (e) { console.warn('IndexedDB unavailable, data will not persist', e); }
+    } catch (e) {
+      console.warn('IndexedDB unavailable, using localStorage fallback', e); idb = null;
+      try { const j = localStorage.getItem('lbfb@' + H); if (j) JSON.parse(j).forEach(([k, v]) => store.set(k, v)); } catch (x) {}
+      const bn = () => { const d = document.createElement('div'); d.textContent = 'This browser blocks file storage, so notes are kept in temporary browser storage only (images are not saved). Use the Back up button often.'; d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#fff3cd;color:#5c4400;font:13px sans-serif;padding:8px 12px;text-align:center'; d.onclick = () => d.remove(); document.body.appendChild(d); };
+      if (document.body) bn(); else addEventListener('DOMContentLoaded', bn);
+    }
   })();
   async function legacyCopy() {
     try {
@@ -31,7 +36,7 @@
       for (const [k, v] of blobs) { await tx('blobs', 'readwrite', o => o.put(v, k)); urls.set(k, URL.createObjectURL(v)); }
     } catch (e) { console.warn('legacy copy failed', e); }
   }
-  const persist = (p, v) => { try { localStorage.setItem(K('lb_dirty'), '1'); localStorage.setItem(K('lb_lastchange'), String(Date.now())); } catch (e) {} return idb && tx('docs', 'readwrite', o => v === undefined ? o.delete(p) : o.put(v, p)).catch(() => {}); };
+  const persist = (p, v) => { try { localStorage.setItem(K('lb_dirty'), '1'); localStorage.setItem(K('lb_lastchange'), String(Date.now())); } catch (e) {} if (!idb) { try { localStorage.setItem('lbfb@' + H, JSON.stringify([...store.entries()])); } catch (e) {} return; } return tx('docs', 'readwrite', o => v === undefined ? o.delete(p) : o.put(v, p)).catch(() => {}); };
   const snapDoc = p => ({ id: p.split('/').pop(), exists: store.has(p), data: () => store.has(p) ? clone(store.get(p)) : undefined, metadata: {} });
   const kids = col => [...store.keys()].filter(k => k.startsWith(col + '/') && k.slice(col.length + 1).indexOf('/') < 0);
   const notify = () => subs.slice().forEach(s => s());
@@ -83,6 +88,39 @@
     for (const id of pl.blobs) { const b = o.blobs[id]; await tx('blobs', 'readwrite', s => s.put(unb64(b.d, b.type), id)); }
     LS.set('lb_lastchange', String(Date.now())); LS.set('lb_dirty', '1');
   }
+
+  /* ---------------- Google Drive sync (optional; each person uses their own Google account) ---------------- */
+  const GD_CLIENT = '654527677632-ni067tqujtd5esaac6ja3ik5m1hdcoif.apps.googleusercontent.com';
+  const gdWeb = /^https:$/.test(location.protocol);
+  let gdTok = null, gdExp = 0;
+  const gdLoad = () => window.google && google.accounts && google.accounts.oauth2 ? Promise.resolve() : new Promise((res, rej) => { const e = document.createElement('script'); e.src = 'https://accounts.google.com/gsi/client'; e.onload = res; e.onerror = () => rej(new Error('Could not reach Google (are you offline?)')); document.head.appendChild(e); });
+  async function gdToken() {
+    if (gdTok && Date.now() < gdExp - 60000) return gdTok;
+    let cid = GD_CLIENT.startsWith('PASTE') ? (LS.get('lb_gclient') || '') : GD_CLIENT;
+    if (!cid) { cid = (prompt('Paste a Google OAuth Client ID to enable Drive sync (the app owner can give you one):') || '').trim(); if (!cid) throw { name: 'AbortError' }; LS.set('lb_gclient', cid); }
+    await gdLoad();
+    return new Promise((res, rej) => {
+      const c = google.accounts.oauth2.initTokenClient({ client_id: cid, scope: 'https://www.googleapis.com/auth/drive.appdata', callback: r => { if (r.error || !r.access_token) return rej(new Error(r.error_description || r.error || 'Google sign-in failed')); gdTok = r.access_token; gdExp = Date.now() + (r.expires_in || 3600) * 1000; res(gdTok); }, error_callback: e => rej(e && e.type === 'popup_closed' ? { name: 'AbortError' } : new Error((e && (e.message || e.type)) || 'Google sign-in failed')) });
+      c.requestAccessToken({ prompt: LS.get('lb_gdlinked') ? '' : 'consent' });
+    });
+  }
+  async function gdSync() {
+    await ready; const t = await gdToken(), h = { Authorization: 'Bearer ' + t }, API = 'https://www.googleapis.com/drive/v3/files';
+    const chk = async r => { if (!r.ok) { if (r.status === 401) gdTok = null; throw new Error('Google Drive error ' + r.status); } return r; };
+    const f = ((await (await chk(await fetch(API + '?spaces=appDataFolder&q=' + encodeURIComponent("name='labbook-sync.json'") + '&fields=files(id)', { headers: h }))).json()).files || [])[0];
+    let added = 0;
+    if (f) {
+      const o = await (await chk(await fetch(API + '/' + f.id + '?alt=media', { headers: h }))).json(), pl = planMerge(o);
+      for (const k of [...pl.add, ...pl.newer]) { store.set(k, o.docs[k]); await persist(k, o.docs[k]); added++; }
+      for (const id of pl.blobs) { const b = o.blobs[id], bl = unb64(b.d, b.type); if (idb) await tx('blobs', 'readwrite', x => x.put(bl, id)); urls.set(id, URL.createObjectURL(bl)); added++; }
+      if (added) notify();
+    }
+    const cur = await makeBackup(), body = JSON.stringify(cur);
+    if (f) await chk(await fetch('https://www.googleapis.com/upload/drive/v3/files/' + f.id + '?uploadType=media', { method: 'PATCH', headers: { ...h, 'Content-Type': 'application/json' }, body }));
+    else { const bd = 'lbsync' + Date.now(); const mp = '--' + bd + '\r\nContent-Type: application/json\r\n\r\n' + JSON.stringify({ name: 'labbook-sync.json', parents: ['appDataFolder'] }) + '\r\n--' + bd + '\r\nContent-Type: application/json\r\n\r\n' + body + '\r\n--' + bd + '--'; await chk(await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { ...h, 'Content-Type': 'multipart/related; boundary=' + bd }, body: mp })); }
+    LS.set('lb_gdlinked', '1'); LS.set('lb_gdlast', new Date().toISOString()); LS.set('lb_lastbackup', cur.at);
+    return added;
+  }
   const stamp = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const metaOpen = () => new Promise((res, rej) => { const r = indexedDB.open('labbook-local-meta', 1); r.onupgradeneeded = () => r.result.createObjectStore('m'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
   const mk = k => H ? H + ':' + k : k;
@@ -108,6 +146,8 @@
     const draw = () => { const lb = LS.get('lb_lastbackup');
       m.innerHTML = `<div class="bx"><h3>Backup &amp; restore</h3><div class="s">Your data lives only in this browser. Last backup: <b>${ago(lb)}</b>${lb ? ' (' + new Date(lb).toLocaleString() + ')' : ''}.</div>
       ${newer ? `<div class="s w"><b>The backup folder has newer data</b> (${new Date(newer.at).toLocaleString()}) than this browser. <button class="p" data-a="loadnewer">Load it</button><button data-a="ignorenewer">Ignore</button></div>` : ''}
+      <div class="s"><b>Google Drive sync</b> (works on all your devices)<br>${gdWeb ? 'Last sync: <b>' + ago(LS.get('lb_gdlast')) + '</b>. Saves a private copy in your own Google Drive app folder and merges changes from your other devices. Pages deleted on one device can come back from another.' : 'Open the hosted web address (https) to use Google Drive sync.'}</div>${gdWeb ? '<button class="p" data-a="gd">Sync with Google Drive now</button>' : ''}
+      <hr style="border:0;border-top:1px solid #ddd;margin:12px 0">
       <button class="p" data-a="dl">Download backup file now</button><button data-a="rs">Restore from a file (replaces everything)…</button><button data-a="mg">Merge a backup file (adds missing, keeps newer)…</button>
       <hr style="border:0;border-top:1px solid #ddd;margin:12px 0"><b>Automatic daily backup</b>
       ${canFolder ? `<div class="s">${folderName ? 'Folder: <b>' + folderName + '</b>' + (dirOK ? ' · active' : ' · needs permission this session') : 'No folder chosen yet.'}<br>While Personal Lab Notebook is open it saves a dated file there (once a day, and after changes), keeps the last 14, and always updates <code>labbook-latest.json</code>. Pick a folder that syncs (OneDrive, Dropbox, Google Drive) to use it on another computer.</div>
@@ -123,6 +163,7 @@
           if (!n) return alert('Nothing to merge: this copy already has everything in that backup that is newer or missing.'); if (!confirm(msg)) return;
           const cur = await makeBackup(); const bb = new Blob([JSON.stringify(cur)], { type: 'application/json' }); const l = document.createElement('a'); l.href = URL.createObjectURL(bb); l.download = 'labbook-before-merge-' + stamp(new Date()) + '.json'; document.body.appendChild(l); l.click(); setTimeout(() => { l.remove(); URL.revokeObjectURL(l.href); }, 2000);
           await new Promise(r => setTimeout(r, 600)); await applyMerge(o, pl); location.reload(); } catch (err) { alert('Could not merge: ' + err.message); } }; i.click(); }
+        else if (a === 'gd') { e.target.disabled = true; try { const n = await gdSync(); alert('Synced with Google Drive.' + (n ? ' Added or updated ' + n + ' item(s) from Drive.' : '')); } finally { e.target.disabled = false; } }
         else if (a === 'pick') { dirH = await showDirectoryPicker({ mode: 'readwrite', id: 'labbook-backup' }); await metaSet('dir', dirH); folderName = dirH.name; await checkDir(true); if (dirOK) { await folderBackup(); } }
         else if (a === 'allow') { await checkDir(true); if (dirOK) await folderBackup(); }
         else if (a === 'now') { await folderBackup(); }
@@ -145,6 +186,7 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', backupInit); else backupInit();
   window.__blobUrl = id => urls.get(id) || '';
   window.claude = { use: async n => { await ready; return ({ db, user, downloads, assets })[n] || null; } };
+  if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 })();
 </script></head><body style="margin:0"><meta name="claude:viewport-fit-sides" content="cover">
 <title>Personal Lab Notebook</title>
@@ -274,6 +316,14 @@ details.snote{margin-top:8px;border:1px solid var(--line);border-radius:6px;padd
 .pgtb{display:flex;flex-wrap:wrap;gap:3px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px 8px 0 0;padding:5px;position:sticky;top:0;z-index:5}
 .tbb{font:inherit;font-size:13px;border:1px solid transparent;background:transparent;color:var(--ink);border-radius:5px;padding:3px 8px;cursor:pointer;min-width:30px}.tbb:hover{background:var(--soft);border-color:var(--line)}
 .pgtb .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.tcl{font-weight:700;font-size:14px;line-height:1;border-bottom:3px solid var(--tc,#c00000);display:inline-block;padding:0 1px}
+.tbb[data-c=color]{min-width:18px;padding:3px 3px}
+.cpop{position:fixed;z-index:60;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;box-shadow:0 6px 24px rgba(0,0,0,.18);width:232px}
+.cpop .cg{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;margin:6px 0}
+.cpop .cs{width:19px;height:19px;border-radius:3px;border:1px solid rgba(0,0,0,.25);cursor:pointer;padding:0}.cpop .cs:hover{outline:2px solid var(--accent);outline-offset:1px}
+.cpop .cl{font-size:11px;color:var(--mute);margin:2px 0}
+.cpop .cb{display:block;width:100%;text-align:left;font:inherit;font-size:13px;border:1px solid transparent;background:transparent;color:var(--ink);border-radius:5px;padding:4px 6px;cursor:pointer}.cpop .cb:hover{background:var(--soft);border-color:var(--line)}
+.cpop input[type=color]{width:26px;height:20px;padding:0;border:1px solid var(--line);border-radius:3px;vertical-align:middle;background:none;cursor:pointer}
 .pgpage.pgbody{background:#fff;color:#1c2321;border:1px solid var(--line);border-radius:0 0 8px 8px;padding:28px 34px;min-height:380px;font-size:15px;line-height:1.6;overflow-wrap:anywhere}
 .pgpage.pgbody:not(.pged){border-radius:8px}.pged:focus{outline:2px solid var(--accent);outline-offset:-2px}
 .eqn{cursor:pointer;border-radius:4px;padding:0 2px}.eqn:hover{background:rgba(26,107,89,.12)}.eqn[data-d="1"]{display:block;text-align:center;margin:8px 0;font-size:1.2em}.eqn[data-d="1"] math{display:block math}.eqn math{font-family:"Cambria Math","STIX Two Math","Latin Modern Math",serif}.eqempty{color:#a33;font-style:italic}
@@ -1963,7 +2013,7 @@ function drawEntry() { if (E?.rich) drawPage(); else drawEntryLegacy(); }
 const attachCard = (signed, isMine) => EF.length || (ASSETS && CAN_WRITE && (isMine || IS_ADMIN)) ? `<div class="card"><b>Attachments</b> <span class="sub" style="margin:0 0 0 6px">files kept with the page</span>
     ${EF.length ? `<div class="figs">${EF.map(f => figHTML({ id: f.assetId, type: f.type, caption: f.caption }, 0, `<figcaption>${esc(f.caption || f.name || '')}<br><small>${who(f.authorId)} · ${fmtD(f.at)}${E.signedAt && f.at > E.signedAt ? ' · added after signing' : ''}</small></figcaption>${!E.signedAt && canDelete(f.authorId) ? `<button class="b sm danger" data-act="efdel" data-id="${f.fid}" style="margin-top:4px">Remove</button>` : ''}`)).join('')}</div>` : '<p class="sub" style="margin:6px 0">None yet.</p>'}
     ${ASSETS && CAN_WRITE && (isMine || IS_ADMIN) ? `<div style="margin-top:8px"><button class="b" data-act="eattach">🖼 Attach image / PDF</button></div>` : ''}</div>` : '';
-const TB = [['undo', '↶', 'Undo'], ['redo', '↷', 'Redo'], '|', ['h1', 'H1', 'Heading 1'], ['h2', 'H2', 'Heading 2'], ['h3', 'H3', 'Heading 3'], ['p', '¶', 'Normal text'], '|', ['bold', '<b>B</b>', 'Bold'], ['italic', '<i>I</i>', 'Italic'], ['underline', '<u>U</u>', 'Underline'], ['strikeThrough', '<s>S</s>', 'Strikethrough'], ['hl', '🖍', 'Highlight'], '|', ['ul', '• List', 'Bulleted list'], ['ol', '1. List', 'Numbered list'], ['chk', '☑ To-do', 'Checklist'], '|', ['table', '▦ Table', 'Insert table'], ['hr', '— Line', 'Divider'], ['link', '🔗', 'Link'], ['img', '🖼 Image', 'Insert image or PDF'], ['eq', '∑ Equation', 'Insert equation or formula'], ['ins', '＋ Insert ▾', 'Protocol, bench sheet, inventory item']];
+const TB = [['undo', '↶', 'Undo'], ['redo', '↷', 'Redo'], '|', ['h1', 'H1', 'Heading 1'], ['h2', 'H2', 'Heading 2'], ['h3', 'H3', 'Heading 3'], ['p', '¶', 'Normal text'], '|', ['bold', '<b>B</b>', 'Bold'], ['italic', '<i>I</i>', 'Italic'], ['underline', '<u>U</u>', 'Underline'], ['strikeThrough', '<s>S</s>', 'Strikethrough'], ['hl', '🖍', 'Highlight'], ['colorapply', '<span class="tcl" id="tcl">A</span>', 'Text colour (click to apply the last colour)'], ['color', '▾', 'Choose text colour'], '|', ['ul', '• List', 'Bulleted list'], ['ol', '1. List', 'Numbered list'], ['chk', '☑ To-do', 'Checklist'], '|', ['table', '▦ Table', 'Insert table'], ['hr', '— Line', 'Divider'], ['link', '🔗', 'Link'], ['img', '🖼 Image', 'Insert image or PDF'], ['eq', '∑ Equation', 'Insert equation or formula'], ['ins', '＋ Insert ▾', 'Protocol, bench sheet, inventory item']];
 function drawPage() {
   const el = $('#ebody'); if (!el || !E) return; if (PG.dirty && $('#pg')) return;
   const revs = ER.filter(r => r.kind !== 'addendum'), adds = ER.filter(r => r.kind === 'addendum'), latest = revs[revs.length - 1];
@@ -2019,7 +2069,7 @@ function setupEditor(pg) {
   pg.addEventListener('dragover', e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault(); });
   pg.addEventListener('drop', e => { const files = [...(e.dataTransfer?.files || [])].filter(f => /^(image\/|application\/pdf)/.test(f.type)); if (files.length) { e.preventDefault(); pgInsertFiles(files); } });
 }
-document.addEventListener('mousedown', e => { if (e.target.closest('.pgtb')) e.preventDefault(); });
+document.addEventListener('mousedown', e => { if (e.target.closest('.pgtb') || (e.target.closest('.cpop') && e.target.type !== 'color')) e.preventDefault(); });
 document.addEventListener('selectionchange', () => { const pg = $('#pg'); if (!pg || !pg.isContentEditable) return; const s = getSelection(); if (s.rangeCount && pg.contains(s.anchorNode)) { PG.range = s.getRangeAt(0).cloneRange(); const t = $('#pgtt'); if (t) t.hidden = !(s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement)?.closest('table'); } });
 function pgRestoreRange() { const pg = $('#pg'); if (!pg) return false; pg.focus(); if (PG.range) { const s = getSelection(); s.removeAllRanges(); s.addRange(PG.range); } return true; }
 function pgInsert(html) { if (!pgRestoreRange()) return; document.execCommand('insertHTML', false, html); hydrate($('#pg'), true); markDirty(); }
@@ -2030,11 +2080,38 @@ async function pgInsertFiles(files) {
   if (!ASSETS) return toast('Adding images needs Contributor or Editor access.', true); toast('Uploading…'); const up = await uploadAll(files); let h = '';
   for (let i = 0; i < up.length; i++) h += pgFig(up[i].id, up[i].type, ''); if (h) { pgInsert(h); toast('Added. Click an image to resize it; type a caption under it.'); }
 }
+const PG_INK = '#1c2321';
+const PG_COLORS = ['#c00000','#ff0000','#ff9900','#ffd400','#92d050','#00b050','#00b0f0','#0070c0','#002060','#7030a0',
+  '#1c2321','#404040','#7f7f7f','#a6a6a6','#7b3f00','#0f766e','#d6336c','#5f3dc4','#1971c2','#2b8a3e'];
+const PG_COLORNAMES = { '#c00000': 'Dark red', '#ff0000': 'Red', '#ff9900': 'Orange', '#ffd400': 'Yellow', '#92d050': 'Light green', '#00b050': 'Green', '#00b0f0': 'Light blue', '#0070c0': 'Blue', '#002060': 'Dark blue', '#7030a0': 'Purple', '#1c2321': 'Black', '#404040': 'Dark grey', '#7f7f7f': 'Grey', '#a6a6a6': 'Light grey', '#7b3f00': 'Brown', '#0f766e': 'Teal', '#d6336c': 'Pink', '#5f3dc4': 'Violet', '#1971c2': 'Strong blue', '#2b8a3e': 'Forest green' };
+function pgLastColor() { try { return localStorage.getItem('lb_tcolor') || '#c00000'; } catch (e) { return '#c00000'; } }
+function pgColorMark(hex) { document.documentElement.style.setProperty('--tc', hex); }
+pgColorMark(pgLastColor());
+function pgColor(hex) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex) || !pgRestoreRange()) return;
+  try { document.execCommand('styleWithCSS', false, true); document.execCommand('foreColor', false, hex); } finally { try { document.execCommand('styleWithCSS', false, false); } catch (e) {} }
+  if (hex.toLowerCase() !== PG_INK) { try { localStorage.setItem('lb_tcolor', hex); } catch (e) {} pgColorMark(hex); }
+  markDirty();
+}
+function pgColorMenu(btn) {
+  document.querySelectorAll('.cpop').forEach(x => x.remove());
+  const r = btn.getBoundingClientRect(), d = document.createElement('div'); d.className = 'cpop'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-label', 'Text colour');
+  d.style.top = Math.min(r.bottom + 4, innerHeight - 250) + 'px'; d.style.left = Math.max(8, Math.min(r.left, innerWidth - 244)) + 'px';
+  d.innerHTML = `<button type="button" class="cb" data-k="auto"><span style="display:inline-block;width:12px;height:12px;background:${PG_INK};border-radius:2px;margin-right:6px;vertical-align:-1px"></span>Automatic (normal text)</button><div class="cl">Colours</div><div class="cg">${PG_COLORS.map(c => `<button type="button" class="cs" data-c="${c}" style="background:${c}" title="${PG_COLORNAMES[c]}" aria-label="${PG_COLORNAMES[c]}"></button>`).join('')}</div><div class="cb" style="cursor:default">More colours <input type="color" id="cpick" value="${pgLastColor()}" aria-label="Pick any colour"></div>`;
+  document.body.appendChild(d);
+  const close = () => { d.remove(); document.removeEventListener('mousedown', away, true); document.removeEventListener('keydown', esc2, true); };
+  const away = e => { if (!d.contains(e.target) && !btn.contains(e.target)) close(); }, esc2 = e => { if (e.key === 'Escape') close(); };
+  setTimeout(() => { document.addEventListener('mousedown', away, true); document.addEventListener('keydown', esc2, true); }, 0);
+  d.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.k === 'auto') pgColor(PG_INK); else if (b.dataset.c) pgColor(b.dataset.c); else return; close(); });
+  d.querySelector('#cpick').addEventListener('change', e => { pgColor(e.target.value); close(); });
+}
 ACT.pgcmd = async el => {
   const c = el.dataset.c; if (!pgRestoreRange()) return; const ex = (a, b) => document.execCommand(a, false, b);
   if (['bold', 'italic', 'underline', 'strikeThrough', 'undo', 'redo'].includes(c)) ex(c);
   else if (['h1', 'h2', 'h3', 'p'].includes(c)) ex('formatBlock', '<' + c + '>');
   else if (c === 'hl') { const s = getSelection(); const on = (s.anchorNode?.nodeType === 1 ? s.anchorNode : s.anchorNode?.parentElement)?.closest('[style*="background"]'); ex('hiliteColor', on ? '#ffffff' : '#fff3a0'); }
+  else if (c === 'colorapply') pgColor(pgLastColor());
+  else if (c === 'color') return pgColorMenu(el);
   else if (c === 'ul' || c === 'ol') { ex(c === 'ul' ? 'insertUnorderedList' : 'insertOrderedList'); document.querySelectorAll('#pg ul.chk').forEach(u => { if (!u.querySelector('li')) u.classList.remove('chk'); }); }
   else if (c === 'chk') { const s = getSelection(); const cur = (s.anchorNode?.nodeType === 1 ? s.anchorNode : s.anchorNode?.parentElement)?.closest('ul'); if (cur?.classList.contains('chk')) { cur.classList.remove('chk'); } else { if (!cur) ex('insertUnorderedList'); const u = (getSelection().anchorNode?.nodeType === 1 ? getSelection().anchorNode : getSelection().anchorNode?.parentElement)?.closest('ul'); if (u) { u.classList.add('chk'); u.querySelectorAll('li').forEach(li => { if (!li.dataset.done) li.dataset.done = '0'; }); } } }
   else if (c === 'hr') ex('insertHTML', '<hr><p><br></p>');
